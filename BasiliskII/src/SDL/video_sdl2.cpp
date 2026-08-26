@@ -2628,20 +2628,26 @@ static void handle_events(void)
 			}
 
 			// Window "close" widget clicked
-			case SDL_QUIT:
+			case SDL_QUIT: {
 				if (SDL_GetModState() & (KMOD_LALT | KMOD_RALT)) break;
 #ifdef __MACOSX__
 				// Hide the window for the control socket's client, which can ask
-				// for it back. The machine runs on with nothing on screen.
+				// for it back. A client takes precedence over `onclose`.
 				if (sdl_window && control_clients_osx() > 0) {
 					show_window_osx(sdl_window, false);
 					window_hidden = true;
 					break;
 				}
 #endif
+				// The close widget sends the power key, and the guest's Shutdown
+				// Manager answers it. `onclose quit` covers a System that ignores
+				// the power key.
+				const char *said = PrefsFindString("onclose");
+				if (said && !strcmp(said, "quit")) { emerg_quit = true; break; }
 				ADBKeyDown(0x7f);	// Power key
 				ADBKeyUp(0x7f);
 				break;
+			}
 			}
 		}
 	}

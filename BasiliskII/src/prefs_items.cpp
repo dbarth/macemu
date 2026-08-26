@@ -84,6 +84,7 @@ prefs_desc common_prefs_items[] = {
 	{"control", TYPE_STRING, false,		"unix socket taking one command per line"},
 	{"hidden", TYPE_BOOLEAN, false,		"start with no window and no Dock icon"},
 	{"nap", TYPE_BOOLEAN, false,		"let macOS throttle this machine while nothing watches it"},
+	{"onclose", TYPE_STRING, false,		"what the window's close widget does (powerkey or quit)"},
 	{"swap_opt_cmd", TYPE_BOOLEAN, false,	"swap option and command key"},
 	{"ignoresegv", TYPE_BOOLEAN, false,    "ignore illegal memory accesses"},
 	{"host_domain", TYPE_STRING, true,	"handle DNS requests for this domain on the host (slirp only)"},
