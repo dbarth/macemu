@@ -47,6 +47,8 @@ prefs_desc common_prefs_items[] = {
 	{"etherconfig", TYPE_STRING, false,"path of network config script"},
 	{"udptunnel", TYPE_BOOLEAN, false, "tunnel all network packets over UDP"},
 	{"udpport", TYPE_INT32, false,    "IP port number for tunneling"},
+	{"udppeer", TYPE_STRING, false,   "host:port receiving every tunnelled frame"},
+	{"udpaddr", TYPE_STRING, false,   "local address the tunnel binds"},
 	{"redir", TYPE_STRING, true,      "port forwarding for slirp"},
 	{"rom", TYPE_STRING, false,       "path of ROM file"},
 	{"bootdrive", TYPE_INT32, false,  "boot drive number"},

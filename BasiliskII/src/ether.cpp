@@ -32,6 +32,7 @@
 
 #if SUPPORTS_UDP_TUNNEL
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <netdb.h>
@@ -72,6 +73,11 @@ static bool udp_tunnel = false;	// Flag: tunnelling AppleTalk over UDP using BSD
 static uint16 udp_port;
 static int udp_socket = -1;
 
+// Every frame goes to this one address, given by `udppeer` as host:port.
+// `udpaddr` binds the local address: a guest and a router can share a host.
+static struct sockaddr_in udp_peer;
+static bool udp_peer_set = false;
+
 // Mac address of driver data in MacOS RAM
 uint32 ether_data = 0;
 
@@ -101,11 +107,30 @@ void EtherInit(void)
 			return;
 		}
 
+		// Split at the last colon. An address with no port uses `udpport`.
+		const char *peer = PrefsFindString("udppeer");
+		if (peer && *peer) {
+			char host[64];
+			const char *colon = strrchr(peer, ':');
+			size_t hlen = colon ? (size_t)(colon - peer) : strlen(peer);
+			if (hlen < sizeof(host)) {
+				memcpy(host, peer, hlen);
+				host[hlen] = '\0';
+				memset(&udp_peer, 0, sizeof(udp_peer));
+				udp_peer.sin_family = AF_INET;
+				udp_peer.sin_addr.s_addr = inet_addr(host);
+				udp_peer.sin_port = htons(colon ? atoi(colon + 1) : udp_port);
+				udp_peer_set = (udp_peer.sin_addr.s_addr != INADDR_NONE);
+			}
+			if (!udp_peer_set) fprintf(stderr, "WARNING: udppeer '%s' is not host:port\n", peer);
+		}
+
 		// Bind to specified address and port
+		const char *bind_addr = PrefsFindString("udpaddr");
 		struct sockaddr_in sa;
 		memset(&sa, 0, sizeof(sa));
 		sa.sin_family = AF_INET;
-		sa.sin_addr.s_addr = INADDR_ANY;
+		sa.sin_addr.s_addr = (bind_addr && *bind_addr) ? inet_addr(bind_addr) : INADDR_ANY;
 		sa.sin_port = htons(udp_port);
 		if (bind(udp_socket, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
 			perror("bind");
@@ -351,6 +376,9 @@ int16 EtherControl(uint32 pb, uint32 dce)
 					sa.sin_family = AF_INET;
 					sa.sin_addr.s_addr = htonl(dest_ip);
 					sa.sin_port = htons(udp_port);
+					// Send every frame to the peer, broadcast included.
+					// The far side routes by the address inside the frame.
+					if (udp_peer_set) sa = udp_peer;
 					if (sendto(udp_socket, packet, len, 0, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
 						D(bug("WARNING: Couldn't transmit packet\n"));
 						return excessCollsns;
