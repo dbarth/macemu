@@ -60,6 +60,7 @@
 #endif
 
 #include <cpu_emulation.h>
+#include "cdrom.h"
 #include "main.h"
 #include "adb.h"
 #include "macos_util.h"
@@ -152,6 +153,16 @@ static SDL_Texture * sdl_texture = NULL;			// Handle to a GPU texture, with whic
 static SDL_Rect sdl_update_video_rect = {0,0,0,0};  // Union of all rects to update, when updating sdl_texture
 static SDL_mutex * sdl_update_video_mutex = NULL;   // Mutex to protect sdl_update_video_rect
 static int screen_depth;							// Depth of current screen
+
+#ifdef __MACOSX__
+// Set while the guest's screen goes into an IOSurface that another process
+// reads without Screen Recording permission. The surface code sits in
+// utils_macosx.mm: CoreFoundation and macos_util.h both define noErr.
+static bool shared_frame_open = false;
+// Set while the window is off screen. `hidden` starts the machine that way,
+// with no Dock icon.
+static bool window_hidden = false;
+#endif
 #ifdef SHEEPSHAVER
 static SDL_Cursor *sdl_cursor = NULL;				// Copy of Mac cursor
 #endif
@@ -673,6 +684,10 @@ driver_base::driver_base(SDL_monitor_desc &m)
 
 static void delete_sdl_video_surfaces()
 {
+#ifdef __MACOSX__
+	close_shared_frame_osx();
+	shared_frame_open = false;
+#endif
 	if (sdl_texture) {
 		SDL_DestroyTexture(sdl_texture);
 		sdl_texture = NULL;
@@ -759,6 +774,14 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
 	
 #if defined(__MACOSX__) && SDL_VERSION_ATLEAST(2,0,14)
 	if (MetalIsAvailable()) window_flags |= SDL_WINDOW_METAL;
+#endif
+#ifdef __MACOSX__
+	// Create the window hidden. The guest's VBL drives present_sdl_video: frames
+	// reach the surface with nothing on screen.
+	if (window_hidden) {
+		window_flags |= SDL_WINDOW_HIDDEN;
+		start_hidden_osx();
+	}
 #endif
 	
 	if (!sdl_window) {
@@ -907,6 +930,12 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
 
 	SDL_RenderSetIntegerScale(sdl_renderer, PrefsFindBool("scale_integer") ? SDL_TRUE : SDL_FALSE);
 
+#ifdef __MACOSX__
+	// Open a surface for this video mode. The guest changes depth and resolution
+	// while it runs: each change rebuilds the surface and keeps the socket.
+	shared_frame_open = control_open_osx() && open_shared_frame_osx(width, height);
+#endif
+
     return guest_surface;
 }
 
@@ -970,6 +999,20 @@ static int present_sdl_video()
 		dstPixels += dstPitch;
 	}
 	SDL_UnlockTexture(sdl_texture);
+
+#ifdef __MACOSX__
+	// host_surface is 32-bit with the palette resolved, ready for a reader to
+	// draw. With nobody reading, the surface goes stale.
+	if (shared_frame_open && !shared_frame_wanted_osx()) {
+		miss_shared_frame_osx();
+	} else if (shared_frame_open) {
+		publish_shared_frame_osx(host_surface->w, host_surface->h,
+								 host_surface->format->format,
+								 host_surface->pixels, host_surface->pitch,
+								 sdl_update_video_rect.x, sdl_update_video_rect.y,
+								 sdl_update_video_rect.w, sdl_update_video_rect.h);
+	}
+#endif
 
     // We are done working with pixels in host_surface.  Reset sdl_update_video_rect, then let
     // other threads modify it, as-needed.
@@ -1406,6 +1449,17 @@ bool VideoInit(bool classic)
 #endif
 	classic_mode = classic;
 
+#ifdef __MACOSX__
+	// Open the socket once per machine: it outlives every video mode change.
+	// `hidden` decides whether the first window reaches the screen.
+	window_hidden = PrefsFindBool("hidden");
+	{
+		const char *control = PrefsFindString("control");
+		if (control && *control) open_control_osx(control);
+	}
+	allow_nap_osx(PrefsFindBool("nap"));
+#endif
+
 #ifdef ENABLE_VOSF
 	// Zero the mainBuffer structure
 	mainBuffer.dirtyPages = NULL;
@@ -1645,6 +1699,10 @@ void SDL_monitor_desc::video_close(void)
 
 void VideoExit(void)
 {
+#ifdef __MACOSX__
+	close_control_osx();
+#endif
+
 	// Close displays
 	vector<monitor_desc *>::iterator i, end = VideoMonitors.end();
 	for (i = VideoMonitors.begin(); i != end; ++i)
@@ -2335,8 +2393,118 @@ static int SDLCALL on_sdl_event_generated(void *userdata, SDL_Event * event)
 }
 
 
+#ifdef __MACOSX__
+/// Marks the whole screen dirty: the next frame carries all of it.
+static void repaint_everything(void)
+{
+	if (!host_surface) return;
+	SDL_LockMutex(sdl_update_video_mutex);
+	sdl_update_video_rect.x = 0;
+	sdl_update_video_rect.y = 0;
+	sdl_update_video_rect.w = host_surface->w;
+	sdl_update_video_rect.h = host_surface->h;
+	SDL_UnlockMutex(sdl_update_video_mutex);
+}
+
+// What the control socket holds down, to release together. The guest keeps a
+// key matrix: a key with no release stays down until reboot. See `key_states`
+// in `adb.cpp`.
+static bool held_key[128];
+static bool held_button[8];
+
+/// Releases every key and button. Runs on focus loss and when a reader
+/// disconnects.
+static void release_everything(void)
+{
+	for (int i = 0; i < 128; i++)
+		if (held_key[i]) { ADBKeyUp(i); held_key[i] = false; }
+	for (int i = 0; i < 8; i++)
+		if (held_button[i]) { ADBMouseUp(i); held_button[i] = false; }
+}
+
+/// Runs the queued commands on the thread that owns the window and calls ADB.
+/// The reader threads only queue them.
+static void handle_control(void)
+{
+	control_op c;
+	while (next_control_op_osx(&c)) {
+		const int op = c.what;
+		switch (op) {
+		case CONTROL_KEY:
+			// A macOS virtual key code is also an ADB key code: neither side
+			// translates.
+			if (c.down) {
+				if (!held_key[c.a]) { ADBKeyDown(c.a); held_key[c.a] = true; }
+			} else if (held_key[c.a]) {
+				ADBKeyUp(c.a);
+				held_key[c.a] = false;
+			}
+			break;
+		case CONTROL_MOUSE:
+			// The position is in the guest's own pixels. ADBMouseMoved takes
+			// it as absolute outside fullscreen, where the driver grabs the
+			// mouse.
+			ADBMouseMoved(c.a, c.b);
+			break;
+		case CONTROL_CLICK:
+			if (c.a < 0 || c.a >= 8) break;
+			if (c.down) {
+				if (!held_button[c.a]) { ADBMouseDown(c.a); held_button[c.a] = true; }
+			} else if (held_button[c.a]) {
+				ADBMouseUp(c.a);
+				held_button[c.a] = false;
+			}
+			break;
+		case CONTROL_RELEASE:
+			release_everything();
+			break;
+		case CONTROL_CDROM:
+			// Calls what the window's drag-and-drop calls, on the same thread.
+			// A drive keeps its disc until the guest ejects it.
+			if (c.text) CDROMDrop(c.text);
+			break;
+		case CONTROL_SHOW:
+			if (!sdl_window) break;
+			show_window_osx(sdl_window, true);
+			// A window arriving on screen holds nothing drawn: the dirty rect
+			// alone would leave it blank.
+			repaint_everything();
+			window_hidden = false;
+			break;
+		case CONTROL_HIDE:
+			if (!sdl_window) break;
+			show_window_osx(sdl_window, false);
+			window_hidden = true;
+			break;
+		case CONTROL_WATCH:
+		case CONTROL_UNWATCH:
+			// A new reader needs a whole screen. An idle guest draws nothing
+			// for minutes at a time.
+			if (op == CONTROL_WATCH) repaint_everything();
+			activity_changed_osx();
+			break;
+		case CONTROL_POWER:
+			// Sends the keyboard's power key, as the close widget does. The
+			// guest's Shutdown Manager answers it and unmounts the volumes.
+			ADBKeyDown(0x7f);
+			ADBKeyUp(0x7f);
+			break;
+		case CONTROL_QUIT:
+			// Sets the flag Ctrl-Esc sets. The emulator ends the guest the
+			// same way.
+			emerg_quit = true;
+			break;
+		}
+		free(c.text);
+	}
+}
+#endif
+
 static void handle_events(void)
 {
+#ifdef __MACOSX__
+	handle_control();
+#endif
 	SDL_Event events[10];
 	const int n_max_events = sizeof(events) / sizeof(events[0]);
 	int n_events;
@@ -2462,6 +2630,15 @@ static void handle_events(void)
 			// Window "close" widget clicked
 			case SDL_QUIT:
 				if (SDL_GetModState() & (KMOD_LALT | KMOD_RALT)) break;
+#ifdef __MACOSX__
+				// Hide the window for the control socket's client, which can ask
+				// for it back. The machine runs on with nothing on screen.
+				if (sdl_window && control_clients_osx() > 0) {
+					show_window_osx(sdl_window, false);
+					window_hidden = true;
+					break;
+				}
+#endif
 				ADBKeyDown(0x7f);	// Power key
 				ADBKeyUp(0x7f);
 				break;

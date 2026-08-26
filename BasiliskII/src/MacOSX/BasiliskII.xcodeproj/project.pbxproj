@@ -1064,11 +1064,13 @@
 				OTHER_LDFLAGS = "";
 				"OTHER_LDFLAGS[arch=arm64]" = (
 					"-luae_cpu_arm64",
+					"-framework IOSurface",
 					"-lgmp",
 					"-lmpfr",
 				);
 				"OTHER_LDFLAGS[arch=x86_64]" = (
 					"-luae_cpu_x86_64",
+					"-framework IOSurface",
 					"-Wl,-no_pie",
 					"-pagezero_size",
 					0x1000,
@@ -1149,11 +1151,13 @@
 				OTHER_LDFLAGS = "";
 				"OTHER_LDFLAGS[arch=arm64]" = (
 					"-luae_cpu_arm64",
+					"-framework IOSurface",
 					"-lgmp",
 					"-lmpfr",
 				);
 				"OTHER_LDFLAGS[arch=x86_64]" = (
 					"-luae_cpu_x86_64",
+					"-framework IOSurface",
 					"-Wl,-no_pie",
 					"-pagezero_size",
 					0x1000,

@@ -34,4 +34,63 @@ void set_current_directory();
 
 bool MetalIsAvailable();
 
+// Command kinds on the control socket. The SDL thread drains the queue.
+enum {
+	CONTROL_NONE = 0,
+	CONTROL_SHOW,
+	CONTROL_HIDE,
+	CONTROL_QUIT,
+	CONTROL_WATCH,
+	CONTROL_UNWATCH,
+	CONTROL_POWER,
+	CONTROL_KEY,		// a: ADB key code, down
+	CONTROL_MOUSE,		// a, b: where, in the guest's own pixels
+	CONTROL_CLICK,		// a: button, down
+	CONTROL_RELEASE,	// releases every key and button this socket holds
+	CONTROL_CDROM,		// text: the disc image to put in the drive
+};
+
+/// `a` and `b` are the code or the position, depending on `what`.
+struct control_op {
+	int what;
+	int a, b;
+	bool down;
+	/// The caller that takes the op off the queue frees this.
+	char *text;
+};
+typedef struct control_op control_op;
+
+// Open a unix socket taking one line of JSON per command: {"op":"show"}.
+bool open_control_osx(const char *path);
+bool control_open_osx();
+void close_control_osx();
+bool next_control_op_osx(control_op *op);
+
+// Whether a client has asked for frames with `watch`. Nothing is copied
+// into the surface while none has.
+bool shared_frame_wanted_osx();
+
+// How many clients are on the control socket, watching or not. The close
+// widget hides the window while there is one.
+int control_clients_osx();
+void miss_shared_frame_osx();
+
+// Whether macOS may throttle this machine. The refusal holds while there is
+// a window on screen or a watcher.
+void allow_nap_osx(bool allowed);
+void activity_changed_osx();
+
+// Put the window and the Dock icon on screen or take them off. Call from
+// any thread; the work runs on the main one.
+void show_window_osx(SDL_Window *window, bool visible);
+void start_hidden_osx();
+
+// Publish the guest's screen into an IOSurface for another process to draw.
+// The control socket carries the surface's id as an event.
+bool open_shared_frame_osx(int width, int height);
+void close_shared_frame_osx();
+void publish_shared_frame_osx(int width, int height, uint32_t format,
+							  const void *pixels, int pitch,
+							  int x, int y, int w, int h);
+
 #endif
