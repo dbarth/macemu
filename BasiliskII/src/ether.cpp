@@ -152,13 +152,15 @@ void EtherInit(void)
 		}
 		udp_ip = ntohl(udp_ip);
 
-		// Construct dummy Ethernet address from local IP address
+		// Build the dummy Ethernet address from the low IP half and the port.
+		// macOS binds one loopback address without an interface alias: the port
+		// tells the guests apart.
 		ether_addr[0] = 'B';
 		ether_addr[1] = '2';
-		ether_addr[2] = udp_ip >> 24;
-		ether_addr[3] = udp_ip >> 16;
-		ether_addr[4] = udp_ip >> 8;
-		ether_addr[5] = udp_ip;
+		ether_addr[2] = udp_ip >> 8;
+		ether_addr[3] = udp_ip;
+		ether_addr[4] = udp_port >> 8;
+		ether_addr[5] = udp_port;
 		D(bug("Ethernet address %02x %02x %02x %02x %02x %02x\n", ether_addr[0], ether_addr[1], ether_addr[2], ether_addr[3], ether_addr[4], ether_addr[5]));
 
 		// Set socket options
